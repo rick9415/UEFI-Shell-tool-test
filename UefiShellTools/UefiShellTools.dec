@@ -1,0 +1,8 @@
+[Defines]
+  DEC_SPECIFICATION = 0x00010005
+  PACKAGE_NAME      = UefiShellTools
+  PACKAGE_GUID      = 4a7c3d1e-8b2f-4e9a-bc56-1f0d23e4a5b6
+  PACKAGE_VERSION   = 0.1
+
+[Includes]
+  Include
