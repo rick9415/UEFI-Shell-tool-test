@@ -20,6 +20,7 @@ A comprehensive UEFI Shell toolkit providing system diagnostic and management ut
 │   └── PciInfo/              # PCI device enumeration
 ├── Include/                  # Shared headers
 ├── UefiToolkit.dsc           # EDK2 package build descriptor
+├── UefiToolkitAmi.dsc        # AMI Aptio V variant (see BUILD_AMI.md)
 └── UefiToolkit.dec           # EDK2 package declaration
 ```
 
@@ -48,15 +49,32 @@ FS0:\> Tools\DiskUtil.nsh
 - [EDK2](https://github.com/tianocore/edk2) source tree
 - NASM ≥ 2.15
 - Python ≥ 3.6
-- GCC or Visual Studio toolchain
+- GCC 9+ (Linux) or Visual Studio 2019/2022 (Windows)
 
-### Build
+### Build — Windows (VS2019)
+
+EDK2 locates NASM via `NASM_PREFIX`. Set it to the directory containing `nasm.exe`, **with a trailing backslash**:
+
+```cmd
+set NASM_PREFIX=C:\nasm\
+```
+
+If you use Strawberry Perl's bundled NASM, the path is `C:\Strawberry\c\bin\`.
+`edksetup.bat` can set this automatically — verify the value has a trailing `\` before building.
+
+```cmd
+cd <edk2-workspace>
+edksetup.bat
+
+build -p UefiToolkitPkg\UefiToolkit.dsc -a X64 -t VS2019
+```
+
+For a release build add `-b RELEASE`.
+
+### Build — Linux (GCC)
 
 ```bash
-# Place this repo inside your EDK2 workspace as UefiToolkitPkg/
 cd <edk2-workspace>
-git clone <this-repo> UefiToolkitPkg
-
 source edksetup.sh
 build -p UefiToolkitPkg/UefiToolkit.dsc -a X64 -t GCC5
 
@@ -65,15 +83,17 @@ cmdedksetup.bat
 build -p UefiToolkitPkg/UefiToolkit.dsc -a X64 -t VS2019
 ```
 
-Compiled `.efi` files appear under `Build/UefiToolkitPkg/`.
+### Output
+
+Compiled `.efi` files appear under `Build/UefiToolkitPkg/<TARGET>_<TOOLCHAIN>/X64/`.
 
 Copy them to your EFI partition and run from the UEFI Shell:
 
 ```
 FS0:\> SysInfo.efi
-FS0:\> MemTest.efi  -s 64  -p 3
+FS0:\> MemTest.efi
 FS0:\> DiskInfo.efi
-FS0:\> PciInfo.efi  -v
+FS0:\> PciInfo.efi
 ```
 
 ## Tools Reference
@@ -86,6 +106,10 @@ FS0:\> PciInfo.efi  -v
 | Boot Manager | `BootMgr.nsh` | — | View/modify UEFI boot options |
 | Disk Utility | `DiskUtil.nsh` | `DiskInfo.efi` | Block devices and partition tables |
 | PCI Info | — | `PciInfo.efi` | PCI/PCIe device tree |
+
+## AMI Aptio V
+
+See [BUILD_AMI.md](BUILD_AMI.md) for instructions on building inside an AMI Aptio V SDK environment.
 
 ## License
 

@@ -25,6 +25,8 @@
 #include <Protocol/Smbios.h>
 #include <IndustryStandard/SmBios.h>
 
+#define TOOLKIT_VERSION  L"1.0.0"
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -234,7 +236,7 @@ ShowCpuInfo (
     PrintSmbiosString (Buf, &T4->Hdr, T4->Socket);
 
     UnicodeSPrint (Buf, sizeof (Buf), L"CPU %lu Manufacturer", (UINT64)CpuIdx);
-    PrintSmbiosString (Buf, &T4->Hdr, T4->ProcessorManufacture);
+    PrintSmbiosString (Buf, &T4->Hdr, T4->ProcessorManufacturer);
 
     UnicodeSPrint (Buf, sizeof (Buf), L"CPU %lu Version", (UINT64)CpuIdx);
     PrintSmbiosString (Buf, &T4->Hdr, T4->ProcessorVersion);
