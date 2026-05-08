@@ -1,0 +1,39 @@
+## @file
+#  PciInfo.inf - UEFI PCI Information Tool Module Description
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION               = 0x00010006
+  BASE_NAME                 = PciInfo
+  FILE_GUID                 = 3A5F3E1B-7C2D-4F89-A1B2-C3D4E5F60004
+  MODULE_TYPE               = UEFI_APPLICATION
+  VERSION_STRING            = 1.0
+  ENTRY_POINT               = ShellCEntryLib
+
+[Sources]
+  PciInfo.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  ShellPkg/ShellPkg.dec
+
+[LibraryClasses]
+  UefiLib
+  UefiBootServicesTableLib
+  MemoryAllocationLib
+  BaseMemoryLib
+  BaseLib
+  PrintLib
+  ShellCEntryLib
+  ShellLib
+  DebugLib
+
+[Protocols]
+  gEfiPciRootBridgeIoProtocolGuid
+
+[BuildOptions]
+  GCC:*_*_*_CC_FLAGS   = -Wall -Wextra -Werror
+  MSFT:*_*_*_CC_FLAGS  = /W4 /WX
