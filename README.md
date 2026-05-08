@@ -59,6 +59,10 @@ git clone <this-repo> UefiToolkitPkg
 
 source edksetup.sh
 build -p UefiToolkitPkg/UefiToolkit.dsc -a X64 -t GCC5
+
+# Windows
+cmdedksetup.bat
+build -p UefiToolkitPkg/UefiToolkit.dsc -a X64 -t VS2019
 ```
 
 Compiled `.efi` files appear under `Build/UefiToolkitPkg/`.
