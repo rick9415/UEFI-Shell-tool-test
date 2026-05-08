@@ -553,7 +553,13 @@ ShellAppMain (
   Print (L"  Done. Press any key to exit.\n");
   Print (L"============================================================\n\n");
 
-  ShellPromptForResponse (ShellPromptResponseTypeAnyKeyContinue, NULL, NULL);
+  {
+    UINTN        Index;
+    EFI_INPUT_KEY Key;
+    gST->ConIn->Reset (gST->ConIn, FALSE);
+    gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index);
+    gST->ConIn->ReadKeyStroke (gST->ConIn, &Key);
+  }
 
   return EFI_SUCCESS;
 }

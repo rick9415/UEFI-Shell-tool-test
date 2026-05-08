@@ -485,7 +485,13 @@ ShellAppMain (
   Print (L"  Result       : %s\n", (TotalErrors == 0) ? L"PASS" : L"FAIL");
   Print (L"============================================================\n\n");
 
-  ShellPromptForResponse (ShellPromptResponseTypeAnyKeyContinue, NULL, NULL);
+  {
+    UINTN        Index;
+    EFI_INPUT_KEY Key;
+    gST->ConIn->Reset (gST->ConIn, FALSE);
+    gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index);
+    gST->ConIn->ReadKeyStroke (gST->ConIn, &Key);
+  }
 
   return (TotalErrors == 0) ? 0 : 1;
 }
