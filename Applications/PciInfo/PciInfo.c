@@ -11,10 +11,14 @@
     - Human-readable class description
 
   Usage:
-    PciInfo.efi [-v] [-b <Bus>] [-h]
+    PciInfo.efi [-v] [-bif] [-b <Bus>] [-h]
 
   Options:
     -v         Verbose: show all BARs and full config space dump
+    -bif       PCIe bifurcation analysis: list all Root Ports and Downstream
+               Ports with Max Link Width vs Negotiated Link Width.  When
+               NegWidth < MaxWidth the port is marked as a bifurcation
+               candidate (could also be a device with a narrower interface).
     -b <Bus>   Limit scan to this PCI bus number
     -h         Help
 
@@ -54,6 +58,15 @@
 
 // PCI express capability ID
 #define PCI_CAPABILITY_ID_PCIEXP     0x10
+
+// PCIe capability structure offsets (relative to capability base)
+#define PCIE_CAP_REG_OFFSET          0x02  // PCIe Capabilities Register
+#define PCIE_CAP_LINK_CAP_OFFSET     0x0C  // Link Capabilities Register (32-bit)
+#define PCIE_CAP_LINK_STA_OFFSET     0x12  // Link Status Register (16-bit)
+
+// PCIe port type values (bits 7:4 of PCIe Capabilities Register)
+#define PCIE_PORT_TYPE_ROOT_PORT     0x4
+#define PCIE_PORT_TYPE_SW_DOWNSTREAM 0x6
 
 // ---------------------------------------------------------------------------
 // Class code table
@@ -124,6 +137,32 @@ STATIC CONST PCI_CLASS_ENTRY gPciClassTable[] = {
   { 0x13, 0x00, L"Non-Essential Instrumentation" },
   { 0xFF, 0xFF, NULL } // sentinel
 };
+
+STATIC SHELL_FILE_HANDLE gOutputFile = NULL;
+
+STATIC VOID
+FPrint (
+  IN CONST CHAR16  *Fmt,
+  ...
+  )
+{
+  VA_LIST  Args;
+  CHAR16   Buf[1024];
+  CHAR8    AsciiBuf[1024];
+  UINTN    Len;
+
+  VA_START (Args, Fmt);
+  UnicodeVSPrint (Buf, sizeof (Buf), Fmt, Args);
+  VA_END (Args);
+
+  Print (L"%s", Buf);
+
+  if (gOutputFile != NULL) {
+    UnicodeStrToAsciiStrS (Buf, AsciiBuf, sizeof (AsciiBuf));
+    Len = AsciiStrLen (AsciiBuf);
+    ShellWriteFile (gOutputFile, &Len, AsciiBuf);
+  }
+}
 
 STATIC CONST CHAR16 *
 PciClassToString (
@@ -198,6 +237,53 @@ PciRead32 (
 }
 
 // ---------------------------------------------------------------------------
+// PCIe capability helpers
+// ---------------------------------------------------------------------------
+
+STATIC UINT8
+FindPcieCapOffset (
+  IN EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL  *RbIo,
+  IN UINTN                             Bus,
+  IN UINTN                             Dev,
+  IN UINTN                             Func
+  )
+{
+  UINT8  CapPtr;
+  UINT8  CapId;
+  UINT8  Next;
+  UINTN  Guard;
+
+  PciRead8 (RbIo, Bus, Dev, Func, PCI_CAPABILITIES_PTR_OFFSET, &CapPtr);
+  CapPtr &= 0xFC;
+  Guard = 0;
+  while (CapPtr != 0 && Guard++ < 48) {
+    PciRead8 (RbIo, Bus, Dev, Func, CapPtr, &CapId);
+    if (CapId == PCI_CAPABILITY_ID_PCIEXP) {
+      return CapPtr;
+    }
+    PciRead8 (RbIo, Bus, Dev, Func, CapPtr + 1, &Next);
+    CapPtr = Next & 0xFC;
+  }
+  return 0;
+}
+
+STATIC CONST CHAR16 *
+PcieLinkWidthStr (
+  IN UINT8  Width
+  )
+{
+  switch (Width) {
+    case  1: return L"x1";
+    case  2: return L"x2";
+    case  4: return L"x4";
+    case  8: return L"x8";
+    case 16: return L"x16";
+    case 32: return L"x32";
+    default: return L"x?";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // BAR display
 // ---------------------------------------------------------------------------
 
@@ -242,7 +328,7 @@ ShowBars (
                      (UINT64)i, Bar & 0xFFFFFFF0,
                      (Bar & BIT3) ? L" [prefetchable]" : L"");
     }
-    Print (L"    %s\n", Buf);
+    FPrint (L"    %s\n", Buf);
   }
 }
 
@@ -289,13 +375,13 @@ ScanPciFunction (
                  VendorId, DeviceId, RevisionId,
                  BaseClass, SubClass, ProgIf,
                  PciClassToString (BaseClass, SubClass));
-  Print (L"  %02X:%02X.%X  %s\n", Bus, Dev, Func, Buf);
+  FPrint (L"  %02X:%02X.%X  %s\n", Bus, Dev, Func, Buf);
 
   if (Verbose) {
     if (HeaderType == 0) {
       PciRead16 (RbIo, Bus, Dev, Func, PCI_SUBSYSTEM_VENDOR_OFFSET, &SubsysVendorId);
       PciRead16 (RbIo, Bus, Dev, Func, PCI_SUBSYSTEM_ID_OFFSET,     &SubsysId);
-      Print (L"            Subsystem: %04X:%04X\n", SubsysVendorId, SubsysId);
+      FPrint (L"            Subsystem: %04X:%04X\n", SubsysVendorId, SubsysId);
     }
     ShowBars (RbIo, Bus, Dev, Func, HeaderType);
   }
@@ -338,6 +424,109 @@ ScanPciBus (
 }
 
 // ---------------------------------------------------------------------------
+// PCIe bifurcation analysis
+// ---------------------------------------------------------------------------
+
+STATIC VOID
+PrintBifurcationAnalysis (
+  IN EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL  *RbIo,
+  IN UINTN                             BridgeIndex
+  )
+{
+  UINTN          Bus;
+  UINTN          Dev;
+  UINTN          Func;
+  UINTN          FuncMax;
+  UINT16         VendorId;
+  UINT8          BaseClass;
+  UINT8          HeaderType;
+  UINT8          CapOff;
+  UINT16         PcieCap;
+  UINT32         LinkCap;
+  UINT16         LinkSta;
+  UINT8          PortType;
+  UINT8          MaxW;
+  UINT8          NegW;
+  BOOLEAN        HeaderPrinted;
+  CONST CHAR16  *Hint;
+
+  HeaderPrinted = FALSE;
+
+  for (Bus = 0; Bus < 256; Bus++) {
+    for (Dev = 0; Dev < 32; Dev++) {
+      PciRead16 (RbIo, Bus, Dev, 0, PCI_VENDOR_ID_OFFSET, &VendorId);
+      if (VendorId == 0xFFFF || VendorId == 0x0000) {
+        continue;
+      }
+
+      PciRead8 (RbIo, Bus, Dev, 0, PCI_HEADER_TYPE_OFFSET, &HeaderType);
+      FuncMax = (HeaderType & BIT7) ? 8 : 1;
+
+      for (Func = 0; Func < FuncMax; Func++) {
+        if (Func > 0) {
+          PciRead16 (RbIo, Bus, Dev, Func, PCI_VENDOR_ID_OFFSET, &VendorId);
+          if (VendorId == 0xFFFF || VendorId == 0x0000) {
+            continue;
+          }
+        }
+
+        // Root and downstream ports always have bridge class code
+        PciRead8 (RbIo, Bus, Dev, Func, PCI_BASECLASS_OFFSET, &BaseClass);
+        if (BaseClass != 0x06) {
+          continue;
+        }
+
+        CapOff = FindPcieCapOffset (RbIo, Bus, Dev, Func);
+        if (CapOff == 0) {
+          continue;
+        }
+
+        PciRead16 (RbIo, Bus, Dev, Func, CapOff + PCIE_CAP_REG_OFFSET, &PcieCap);
+        PortType = (UINT8)((PcieCap >> 4) & 0xF);
+        if (PortType != PCIE_PORT_TYPE_ROOT_PORT &&
+            PortType != PCIE_PORT_TYPE_SW_DOWNSTREAM) {
+          continue;
+        }
+
+        PciRead32 (RbIo, Bus, Dev, Func, CapOff + PCIE_CAP_LINK_CAP_OFFSET, &LinkCap);
+        PciRead16 (RbIo, Bus, Dev, Func, CapOff + PCIE_CAP_LINK_STA_OFFSET, &LinkSta);
+        MaxW = (UINT8)((LinkCap >> 4) & 0x3F);
+        NegW = (UINT8)((LinkSta >> 4) & 0x3F);
+
+        if (!HeaderPrinted) {
+          FPrint (L"\n  [Root Bridge %lu - PCIe Bifurcation Analysis]\n\n", (UINT64)BridgeIndex);
+          FPrint (L"  %-10s  %-14s  %-8s  %-8s  %s\n",
+                  L"BDF", L"Port Type", L"MaxWidth", L"NegWidth", L"Note");
+          FPrint (L"  %-10s  %-14s  %-8s  %-8s  %s\n",
+                  L"----------", L"--------------", L"--------", L"--------", L"----");
+          HeaderPrinted = TRUE;
+        }
+
+        if (NegW == 0) {
+          Hint = L"No link / empty";
+        } else if (NegW < MaxW) {
+          Hint = L"[*] Width reduced - bifurcated or narrow device";
+        } else {
+          Hint = L"Full width";
+        }
+
+        FPrint (L"  %02X:%02X.%X  %-14s  %-8s  %-8s  %s\n",
+                Bus, Dev, Func,
+                (PortType == PCIE_PORT_TYPE_ROOT_PORT) ? L"Root Port" : L"SW Downstream",
+                PcieLinkWidthStr (MaxW),
+                PcieLinkWidthStr (NegW),
+                Hint);
+      }
+    }
+  }
+
+  if (!HeaderPrinted) {
+    FPrint (L"\n  [Root Bridge %lu] No PCIe Root/Downstream ports detected.\n",
+            (UINT64)BridgeIndex);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Entry Point
 // ---------------------------------------------------------------------------
 
@@ -350,6 +539,7 @@ ShellAppMain (
 {
   EFI_STATUS                        Status;
   BOOLEAN                           Verbose;
+  BOOLEAN                           Bifurcation;
   INTN                              FilterBus;
   UINTN                             i;
   EFI_HANDLE                       *Handles;
@@ -357,31 +547,50 @@ ShellAppMain (
   EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL  *RbIo;
   UINTN                             Bus;
 
-  Verbose   = FALSE;
-  FilterBus = -1;
+  Verbose      = FALSE;
+  Bifurcation  = FALSE;
+  FilterBus    = -1;
 
   for (i = 1; i < Argc; i++) {
     if (StrnCmp (Argv[i], L"-v", 2) == 0) {
       Verbose = TRUE;
+    } else if (StrnCmp (Argv[i], L"-bif", 4) == 0) {
+      Bifurcation = TRUE;
     } else if (StrnCmp (Argv[i], L"-b", 2) == 0 && (i + 1) < Argc) {
       FilterBus = (INTN)StrDecimalToUintn (Argv[++i]);
     } else if (StrnCmp (Argv[i], L"-h", 2) == 0 ||
                StrnCmp (Argv[i], L"--help", 6) == 0) {
-      Print (L"Usage: PciInfo.efi [-v] [-b Bus] [-h]\n");
+      Print (L"Usage: PciInfo.efi [-v] [-bif] [-b Bus] [-h]\n");
       Print (L"  -v        Verbose (BARs, subsystem IDs)\n");
+      Print (L"  -bif      PCIe bifurcation analysis (link width per root port)\n");
       Print (L"  -b <bus>  Scan only this bus number\n");
       Print (L"  -h        Help\n");
       return 0;
     }
   }
 
-  Print (L"\n============================================================\n");
-  Print (L"  UEFI PCI/PCIe Device Information Tool v%s\n", TOOLKIT_VERSION);
-  Print (L"============================================================\n\n");
+  // Automatically save output to PciInfo.txt
+  {
+    EFI_STATUS  FileStatus;
+    FileStatus = ShellOpenFileByName (
+                   L"PciInfo.txt",
+                   &gOutputFile,
+                   EFI_FILE_MODE_CREATE | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_READ,
+                   0
+                   );
+    if (EFI_ERROR (FileStatus)) {
+      Print (L"Warning: Cannot create PciInfo.txt (%r)\n", FileStatus);
+      gOutputFile = NULL;
+    }
+  }
+
+  FPrint (L"\n============================================================\n");
+  FPrint (L"  UEFI PCI/PCIe Device Information Tool v%s\n", TOOLKIT_VERSION);
+  FPrint (L"============================================================\n\n");
 
   // Print column header
-  Print (L"  %-10s  %-62s\n", L"BDF", L"VendID:DevID  Rev  Class  [Description]");
-  Print (L"  %-10s  %-62s\n", L"----------", L"--------------------------------------------------------------");
+  FPrint (L"  %-10s  %-62s\n", L"BDF", L"VendID:DevID  Rev  Class  [Description]");
+  FPrint (L"  %-10s  %-62s\n", L"----------", L"--------------------------------------------------------------");
 
   Status = gBS->LocateHandleBuffer (
                   ByProtocol,
@@ -391,7 +600,11 @@ ShellAppMain (
                   &Handles
                   );
   if (EFI_ERROR (Status)) {
-    Print (L"  No PCI Root Bridges found (%r).\n", Status);
+    FPrint (L"  No PCI Root Bridges found (%r).\n", Status);
+    if (gOutputFile != NULL) {
+      ShellCloseFile (&gOutputFile);
+      gOutputFile = NULL;
+    }
     return 1;
   }
 
@@ -405,7 +618,7 @@ ShellAppMain (
       continue;
     }
 
-    Print (L"\n  [Root Bridge %lu]\n\n", (UINT64)i);
+    FPrint (L"\n  [Root Bridge %lu]\n\n", (UINT64)i);
 
     if (FilterBus >= 0) {
       ScanPciBus (RbIo, (UINTN)FilterBus, Verbose);
@@ -414,13 +627,23 @@ ShellAppMain (
         ScanPciBus (RbIo, Bus, Verbose);
       }
     }
+
+    if (Bifurcation) {
+      PrintBifurcationAnalysis (RbIo, i);
+    }
   }
 
   FreePool (Handles);
 
-  Print (L"\n============================================================\n");
-  Print (L"  Done. Press any key to exit.\n");
-  Print (L"============================================================\n\n");
+  FPrint (L"\n============================================================\n");
+  FPrint (L"  Done. Press any key to exit.\n");
+  FPrint (L"============================================================\n\n");
+
+  if (gOutputFile != NULL) {
+    ShellCloseFile (&gOutputFile);
+    gOutputFile = NULL;
+    Print (L"  Output saved to: PciInfo.txt\n\n");
+  }
 
   {
     UINTN        Index;
